@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-2016 the original author or authors.
+ * Copyright 2012-2019 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *      https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,9 +25,11 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.After;
-import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import sample.integration.SampleIntegrationApplication;
+import sample.integration.ServiceProperties;
 import sample.integration.producer.ProducerApplication;
 
 import org.springframework.boot.SpringApplication;
@@ -35,7 +37,6 @@ import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.io.DefaultResourceLoader;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.ResourcePatternUtils;
-import org.springframework.util.FileSystemUtils;
 import org.springframework.util.StreamUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -48,19 +49,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 public class SampleIntegrationApplicationTests {
 
+	@Rule
+	public final TemporaryFolder temp = new TemporaryFolder();
+
 	private ConfigurableApplicationContext context;
-
-	@Before
-	public void deleteInputAndOutput() throws InterruptedException {
-		deleteIfExists(new File("target/input"));
-		deleteIfExists(new File("target/output"));
-	}
-
-	private void deleteIfExists(File directory) throws InterruptedException {
-		if (directory.exists()) {
-			assertThat(FileSystemUtils.deleteRecursively(directory)).isTrue();
-		}
-	}
 
 	@After
 	public void stop() {
@@ -71,39 +63,43 @@ public class SampleIntegrationApplicationTests {
 
 	@Test
 	public void testVanillaExchange() throws Exception {
-		this.context = SpringApplication.run(SampleIntegrationApplication.class);
-		SpringApplication.run(ProducerApplication.class, "World");
-		String output = getOutput();
+		File inputDir = new File(this.temp.getRoot(), "input");
+		File outputDir = new File(this.temp.getRoot(), "output");
+		this.context = SpringApplication.run(SampleIntegrationApplication.class,
+				"--service.input-dir=" + inputDir, "--service.output-dir=" + outputDir);
+		SpringApplication.run(ProducerApplication.class, "World",
+				"--service.input-dir=" + inputDir, "--service.output-dir=" + outputDir);
+		String output = getOutput(outputDir);
 		assertThat(output).contains("Hello World");
 	}
 
 	@Test
 	public void testMessageGateway() throws Exception {
+		File inputDir = new File(this.temp.getRoot(), "input");
+		File outputDir = new File(this.temp.getRoot(), "output");
 		this.context = SpringApplication.run(SampleIntegrationApplication.class,
-				"testviamg");
-		String output = getOutput();
+				"testviamg", "--service.input-dir=" + inputDir,
+				"--service.output-dir=" + outputDir);
+		String output = getOutput(
+				this.context.getBean(ServiceProperties.class).getOutputDir());
 		assertThat(output).contains("testviamg");
 	}
 
-	private String getOutput() throws Exception {
+	private String getOutput(File outputDir) throws Exception {
 		Future<String> future = Executors.newSingleThreadExecutor()
 				.submit(new Callable<String>() {
 					@Override
 					public String call() throws Exception {
-						Resource[] resources = getResourcesWithContent();
+						Resource[] resources = getResourcesWithContent(outputDir);
 						while (resources.length == 0) {
 							Thread.sleep(200);
-							resources = getResourcesWithContent();
+							resources = getResourcesWithContent(outputDir);
 						}
 						StringBuilder builder = new StringBuilder();
 						for (Resource resource : resources) {
-							InputStream inputStream = resource.getInputStream();
-							try {
+							try (InputStream inputStream = resource.getInputStream()) {
 								builder.append(new String(
 										StreamUtils.copyToByteArray(inputStream)));
-							}
-							finally {
-								inputStream.close();
 							}
 						}
 						return builder.toString();
@@ -112,15 +108,18 @@ public class SampleIntegrationApplicationTests {
 		return future.get(30, TimeUnit.SECONDS);
 	}
 
-	private Resource[] getResourcesWithContent() throws IOException {
+	private Resource[] getResourcesWithContent(File outputDir) throws IOException {
 		Resource[] candidates = ResourcePatternUtils
 				.getResourcePatternResolver(new DefaultResourceLoader())
-				.getResources("file:target/output/**");
+				.getResources("file:" + outputDir.getAbsolutePath() + "/**");
 		for (Resource candidate : candidates) {
-			if (candidate.contentLength() == 0) {
+			if ((candidate.getFilename() != null
+					&& candidate.getFilename().endsWith(".writing"))
+					|| candidate.contentLength() == 0) {
 				return new Resource[0];
 			}
 		}
 		return candidates;
 	}
+
 }
